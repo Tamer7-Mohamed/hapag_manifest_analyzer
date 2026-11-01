@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hapag-Lloyd Manifest Analyzer</title>
+<style>
+*{box-sizing:border-box}body{font-family:Tahoma,Arial;background:#f3f6fa;color:#172235;margin:0;padding:24px}main{max-width:1100px;margin:auto;background:white;padding:24px;border-radius:16px;box-shadow:0 4px 24px #152b4612}h1{margin-top:0;color:#063b70}p{line-height:1.8}.drop{border:2px dashed #8ba9c7;padding:28px;text-align:center;border-radius:12px;background:#f8fbff}.drop input{margin:12px}button{background:#075a9e;color:white;border:0;padding:11px 18px;border-radius:8px;cursor:pointer;margin:5px}button:disabled{opacity:.5;cursor:wait}.status{padding:12px;background:#eef5fc;border-radius:8px;margin:12px 0}.summary{display:flex;gap:10px;flex-wrap:wrap}.pill{padding:10px 16px;border-radius:8px;background:#e8f2ff}.bad{background:#ffe8e8;color:#9a1717}.warn{background:#fff4d6;color:#755300}.good{background:#e3f7e9;color:#135b2a}table{width:100%;border-collapse:collapse;margin-top:18px;font-size:13px;direction:ltr}th,td{border:1px solid #d8e0e9;padding:8px;text-align:left;vertical-align:top}th{background:#eaf2fa;position:sticky;top:0}td.issue{background:#fff0f0;color:#8b1717}td.warning{background:#fff8e5;color:#745300}.tablewrap{overflow:auto;max-height:65vh}.small{font-size:12px;color:#526276}.checks{margin:12px 0}.checks label{margin-left:16px}
+</style>
+</head><body><main>
+<h1>Hapag-Lloyd | Cargo Manifest PDF Analyzer</h1>
+<p>ارفع ملف <b>Cargo Manifest PDF</b> وسيتم استخراج بيانات الـ B/Ls وفحص الحقول الأساسية، التكرارات، الـ ACID، أرقام الحاويات والأختام. المعالجة تتم داخل المتصفح.</p>
+<div class="drop"><b>اختار ملف الـ Manifest بصيغة PDF</b><br><input type="file" id="file" accept="application/pdf"><br><button id="analyze">تحليل الملف</button></div>
+<div class="status" id="status">جاهز لاستقبال الملف.</div>
+<div class="summary" id="summary"></div>
+<div class="checks"><button id="export" disabled>تصدير التقرير Excel</button><button id="csv" disabled>تصدير CSV</button></div>
+<div class="tablewrap"><table id="results"><thead><tr><th>PDF Page</th><th>B/L</th><th>ACID</th><th>Shipper ID</th><th>Container(s)</th><th>Seal(s)</th><th>HS Code</th><th>Gross Weight</th><th>Checks / Issues</th></tr></thead><tbody></tbody></table></div>
+<p class="small">تنبيه: الأداة تفحص البيانات الموجودة في الملف فقط. لا تتحقق من صلاحية ACID رسميًا لدى منصة Nafeza/الجمارك، ولا تستبدل المراجعة النهائية.</p>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script>
+const $=id=>document.getElementById(id); let report=[];
+if(window.pdfjsLib){pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'}
+function clean(s){return (s||'').replace(/[\u00a0\t]+/g,' ').replace(/\s+/g,' ').trim()}
+function unique(a){return [...new Set(a.filter(Boolean))]}
+function matches(text,re){return [...text.matchAll(re)].map(m=>m[1]||m[0])}
+function extractField(text,regex){let m=text.match(regex);return m?clean(m[1]):''}
+function parseRecords(pages){
+ let records=[];
+ // Hapag documents commonly start each B/L section with DOCUMENT ---- (0001) ----
+ let all=pages.map((p,i)=>`\n[[PAGE:${i+1}]]\n${p}`).join('\n');
+ let marker=/DOCUMENT\s*[-—_]{3,}\s*\(?\s*(\d{4})\s*\)?\s*[-—_]{2,}/gi;
+ let hits=[...all.matchAll(marker)];
+ if(!hits.length){ // fallback: detect B/L number and split around it
+   let blre=/\b([A-Z]{4}[A-Z0-9]{6,})\s+BL\b/g; let hm=[...all.matchAll(blre)];
+   hm.forEach((m,i)=>{let start=Math.max(0,m.index-500),end=i+1<hm.length?hm[i+1].index:all.length;records.push({block:all.slice(start,end),page:(all.slice(0,m.index).match(/\[\[PAGE:(\d+)\]\]/g)||[]).pop()?.match(/\d+/)?.[0]||'?'})});
+ } else hits.forEach((m,i)=>{let start=m.index,end=i+1<hits.length?hits[i+1].index:all.length;let block=all.slice(start,end);let pg=(block.match(/\[\[PAGE:(\d+)\]\]/)||[])[1]||'?';records.push({block,page:pg})});
+ return records;
+}
+function parseBlock(block,page){
+ let bl=extractField(block,/\b([A-Z]{4}[A-Z0-9]{7,})\s+BL\b/i)||extractField(block,/\bB\/L\s*(?:NO\.?|NUMBER)?\s*[:#]?\s*([A-Z0-9]{10,})/i);
+ let acid=extractField(block,/\bACID\s*(?:NO\.?|NUMBER)?\s*[:#]?\s*([0-9]{15,25})/i);
+ let shipper=extractField(block,/\bSHIPPER\s*ID\s*[:#]?\s*([A-Z0-9-]{5,})/i);
+ let containers=unique(matches(block,/\b([A-Z]{4}\s*\d{7})\s*\(\s*[A-Z0-9]{4}\s*\)/gi).map(x=>x.replace(/\s/g,'')));
+ let seals=unique(matches(block,/\bSEAL\s*(?:NO\.?\s*)?(?:1|2|3)?\s*[:#]?\s*([A-Z0-9-]{5,})/gi));
+ let hs=unique(matches(block,/\bHS\s*CODE\s*[:#]?\s*([0-9.]{6,})/gi));
+ let gross=extractField(block,/\b([\d,]+\.\d{3})\s*KGM\s*GROSS\b/i);
+ let issues=[]; if(!bl)issues.push('B/L غير واضح');if(!acid)issues.push('ACID غير موجود');if(!shipper)issues.push('Shipper ID غير موجود');if(!containers.length)issues.push('Container غير مكتشف');if(!seals.length)issues.push('Seal غير مكتشف');if(!hs.length)issues.push('HS Code غير مكتشف');
+ return {page,bl,acid,shipper,containers:containers.join(', '),seals:seals.join(', '),hs:hs.join(', '),gross,issues,block};
+}
+function render(){let tb=$('results').querySelector('tbody');tb.innerHTML='';report.forEach(r=>{let tr=document.createElement('tr');let vals=[r.page,r.bl,r.acid,r.shipper,r.containers,r.seals,r.hs,r.gross,r.issues.join(' | ')||'OK'];vals.forEach((v,i)=>{let td=document.createElement('td');td.textContent=v||'—';if(i===8&&r.issues.length)td.className='issue';tr.appendChild(td)});tb.appendChild(tr)});
+ let missing=report.filter(r=>r.issues.length).length;
+ $('summary').innerHTML=`<div class="pill">عدد B/Ls: <b>${report.length}</b></div><div class="pill ${missing?'warn':'good'}">سجلات بها ملاحظات: <b>${missing}</b></div><div class="pill">B/L مكرر: <b>${duplicates('bl')}</b></div><div class="pill">ACID مكرر: <b>${duplicates('acid')}</b></div><div class="pill">Container مكرر: <b>${duplicates('containers')}</b></div>`;
+ $('export').disabled=!report.length;$('csv').disabled=!report.length;
+}
+function duplicates(field){let vals=[];report.forEach(r=>(r[field]||'').split(',').map(x=>x.trim()).filter(Boolean).forEach(x=>vals.push(x)));let cnt={};vals.forEach(x=>cnt[x]=(cnt[x]||0)+1);return Object.values(cnt).filter(n=>n>1).length}
+$('analyze').onclick=async()=>{let f=$('file').files[0];if(!f){$('status').textContent='من فضلك اختار PDF أولاً.';return}if(!window.pdfjsLib){$('status').textContent='تعذر تحميل PDF.js. تأكد من اتصال الإنترنت ثم أعد فتح الصفحة.';return}
+ $('analyze').disabled=true;$('status').textContent='جاري قراءة صفحات PDF…';try{let pdf=await pdfjsLib.getDocument({data:await f.arrayBuffer()}).promise;let pages=[];for(let n=1;n<=pdf.numPages;n++){let p=await pdf.getPage(n),c=await p.getTextContent();pages.push(c.items.map(x=>x.str).join(' '))}$('status').textContent=`تم استخراج النص من ${pdf.numPages} صفحة. جاري تحليل الـ B/Ls…`;let rec=parseRecords(pages);report=rec.map(x=>parseBlock(x.block,x.page));render();$('status').textContent=`انتهى التحليل. عدد الأقسام المكتشفة: ${report.length}. راجع النتائج قبل الاعتماد.`}catch(e){console.error(e);$('status').textContent='حدث خطأ أثناء قراءة PDF. إذا كان الملف عبارة عن صور ممسوحة ضوئيًا فقد يحتاج OCR.'}finally{$('analyze').disabled=false}};
+$('export').onclick=()=>{let data=report.map(({block,...r})=>({...r,issues:r.issues.join('; ')});let ws=XLSX.utils.json_to_sheet(data),wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Manifest Report');XLSX.writeFile(wb,'Hapag_Manifest_Analysis.xlsx')};
+$('csv').onclick=()=>{let data=report.map(({block,...r})=>({...r,issues:r.issues.join('; ')});let ws=XLSX.utils.json_to_sheet(data);XLSX.writeFile({SheetNames:['Report'],Sheets:{Report:ws}},'Hapag_Manifest_Analysis.csv',{bookType:'csv'})};
+</script></body></html>
